@@ -1,0 +1,254 @@
+```{r}
+library(shiny)
+library(igraph)
+library(visNetwork)
+library(readxl)
+library(RiskPortfolios)
+
+```
+
+
+```{r Datasets}
+#Econ variables
+alldailydata <- read_xlsx("All dataset for R.xlsx", sheet = "daily", col_names = TRUE, trim_ws = TRUE)
+dailyecon <- alldailydata[,c("Date","KLCI")]
+dailyecon$Date <- as.Date(dailyecon$Date, format = "%d/%m/%Y")
+
+#KLCI constituents
+top30 <- read_xlsx("Local Stocks Daily.xlsx", sheet = "Top 30", skip = 1, col_names = TRUE, trim_ws = TRUE)
+colnames(top30)[1] <- "Date"
+top30$Date <- as.Date(top30$Date, format = "%m/%d/%Y")
+```
+
+   
+
+```{r Shiny function}
+
+getshiny <- function(dataset, simple.corr = TRUE, title = "", subtitle = ""){
+ui <- fluidPage(
+  #title
+  titlePanel(""),
+  
+  fluidRow(column(width = 1),
+           column(width = 8, sliderInput("rollingdate", label = "Date range:", step = 5,
+                      animate = animationOptions(interval = 2500),
+                      min = dataset$Date[2], 
+                      max = dataset$Date[nrow(dataset)],
+                      value = c(dataset$Date[2], dataset$Date[nrow(dataset)])
+                       ))
+         ),
+
+    # Outputs
+  mainPanel(width = 20,
+     visNetworkOutput("network", width = "100%", height = 650)
+    )
+  )
+
+
+# Server
+
+server <- function(input, output, session, simple.cor = simple.corr) {
+
+
+  output$network <- renderVisNetwork({
+    
+
+    df <- as.data.frame(sapply(dataset[,-1], function(x) diff(log(x))))
+    df <- cbind(Date = dataset$Date[-1], df)
+    df <- df[(df$Date >= input$rollingdate[1] & df$Date <= input$rollingdate[2]),]
+    df <- df[complete.cases(df),] 
+    df <- df[,-1] %>% ts()
+    
+   if(simple.cor == TRUE){cordata <- cor(df)
+  } else {
+  cov <- covEstimation(df, control = list(type = 'ewma', lambda = 0.94))
+  cordata <- cov2cor(cov)}
+    
+  distance <- sqrt(2*(1-abs(cordata)))
+  
+  g1 <- graph.adjacency(distance, weighted = TRUE, mode = "undirected", 
+                        add.colnames = "label")
+  mst <- minimum.spanning.tree(g1)
+  mst_df <- get.data.frame(mst, what = "both" ) 
+    
+  value <- df[nrow(df),(match(mst_df$vertices[,1],colnames(df)))]
+  
+  nodes <- data.frame(id = 1:nrow(mst_df$vertices)
+                        , label = mst_df$vertices$label
+                        , value = abs(value)*0.2
+                        , actualvalue = value 
+                        , color = "yellowgreen"   
+                       )
+    
+    #those that have negative change will be coloured "lightcoral"
+    nodes$color <- as.character(nodes$color)
+    nodes$color[nodes$actualvalue < 0] <- "lightcoral"
+    nodes$color <- as.factor(nodes$color) 
+    nodes$title <-  value %>% round(digits = 4) %>% scales::percent()
+    nodes$title <-  paste(nodes$label, "; return:" , nodes$title)
+    
+    edges <- data.frame(from = mst_df$edges$from, 
+                        to = mst_df$edges$to,
+                        color = "grey")
+    edges$name.from <- mst_df$vertices[edges$from,1] %>% as.character()
+    edges$name.to <- mst_df$vertices[edges$to,1] %>% as.character()
+    edges$title <- c()
+    for (i in 1:nrow(edges)) {
+      edges$title[i] <- cordata[ match(edges$name.from[i],rownames(cordata)),
+                                 match(edges$name.to[i], colnames(cordata))] %>%
+        round(digits = 4)}
+    
+    edges$length <-  abs(1/(edges$title))
+    edges$title <- paste("correlation:", edges$title)
+    edges$color <- as.character(edges$color)
+    edges$color[edges$title < 0] <- "lightcoral"
+    edges$color <- as.factor(edges$color) 
+    
+    visNetwork(nodes, edges, width = "100%", height = 700, 
+               main = list(text = title, style ="font-family:Arial;color:Black;
+                           font-size:25px;text-align:center;"), 
+               submain = list(text = subtitle, style ="font-family:Arial;color:Black;
+                              font-size:20px;text-align:center;")) %>% 
+      visOptions(highlightNearest = TRUE, nodesIdSelection = TRUE) %>% 
+      visInteraction(keyboard = TRUE, tooltipDelay = 0,
+                     tooltipStyle = 'position: fixed;visibility:hidden;
+                     padding:5px;font-family:cursive;color:white;font-size:10px;
+                     background-color:black;', tooltipStay = 500) %>% 
+      visEdges(smooth = TRUE, scaling = list(min=0.2, max=30),
+               color = list(color = "black", highlight = "firebrick")) %>%
+      visNodes(scaling = list(min = 5, max = 20))
+  } )}
+
+
+# Create a Shiny app object
+shinyApp(ui = ui, server = server)}
+```
+
+
+```{r Shiny with sector label}
+
+getshiny_sector <- function(dataset, simple.corr = TRUE, title ="", subtitle=""){
+  
+label <- read_xlsx("Local Stocks Daily.xlsx", sheet = "Label",  col_names = TRUE, trim_ws = TRUE)
+label <- label[complete.cases(label),]
+label <- t(t(label))
+  
+  
+ui <- fluidPage(
+  #title
+  titlePanel(""),
+  
+  fluidRow(column(width = 1), 
+           column(width = 6, sliderInput("rollingdate", label = "Date range:", step = 5,
+                              animate = animationOptions(interval = 2500),
+                              min = dataset$Date[2], 
+                              max = dataset$Date[nrow(dataset)],
+                              value = c(dataset$Date[2], dataset$Date[nrow(dataset)])
+                              ))
+         ),
+
+    # Outputs
+    mainPanel(width = 20,
+     visNetworkOutput("network", width = "100%", height = 650)
+    )
+  )
+
+
+# Server
+server <- function(input, output, session, simple.cor = simple.corr) {
+
+  output$network <- renderVisNetwork({
+
+    df <- as.data.frame(sapply(dataset[,-1], function(x) diff(log(x))))
+    df <- cbind(Date = dataset$Date[-1], df)
+    df <- df[(df$Date >= input$rollingdate[1] & df$Date <= input$rollingdate[2]),]
+    df <- df[complete.cases(df),] 
+    df <- df[,-1] %>% ts()
+    
+   if(simple.cor == TRUE){cordata <- cor(df)
+  } else {
+  cov <- covEstimation(df, control = list(type = 'ewma', lambda = 0.94))
+  cordata <- cov2cor(cov)
+  }
+    
+  #calculation for distance (length of edge) = sqroot(2*(1-correlation))
+  distance <- sqrt(2*(1-abs(cordata)))
+
+  #put data in igraph form and create the minimum spanning tree
+  g1 <- graph.adjacency(distance, weighted = TRUE, mode = "undirected", add.colnames = "label")
+  mst <- minimum.spanning.tree(g1)
+  mst_df <- get.data.frame(mst, what = "both" ) 
+  #put graph values into data frame, with both the vertices & edges
+
+
+  #daily change in the last day
+  #value means size, size of circle(nodes) follows the latest daily change
+  value <- df[nrow(df),(match(mst_df$vertices[,1],colnames(df)))]
+  group <- label[match(mst_df$vertices[,1],label[,1]),2]
+
+
+  #define the edges & nodes
+  edges <- data.frame(from = mst_df$edges$from, 
+                    to = mst_df$edges$to, 
+                    color = "grey")
+
+  #specifying the name of edges
+  edges$name.from <- mst_df$vertices[edges$from,1] %>% as.character()
+  edges$name.to <- mst_df$vertices[edges$to,1] %>% as.character()
+  
+  edges$title <- c()
+  for (i in 1:nrow(edges)) {
+    edges$title[i] <- cordata[ match(edges$name.from[i],rownames(cordata)),
+                             match(edges$name.to[i], colnames(cordata))] %>%
+                              round(digits = 4)}
+  #amplifying the scale of edge length by 40
+  edges$length <-  abs(1/(edges$title+0.1))*50
+  edges$title <- paste("correlation:", edges$title)
+  
+  #those that have negative change will be coloured "lightcoral"
+  edges$color <- as.character(edges$color)
+  edges$color[edges$title < 0] <- "lightcoral"
+  #converting back to "factors" so that R knows it's the color
+  edges$color <- as.factor(edges$color) 
+
+  
+  nodes <- data.frame(id = 1:nrow(mst_df$vertices)
+                      , group = group, label = mst_df$vertices)
+
+  visNetwork(nodes, edges,  main = list(text = title, style = "font-family:Arial;color:Black;
+                                      font-size:25px;text-align:center;"),
+              submain = list(text = subtitle, style ="font-family:Arial;color:Black;
+                                      font-size:20px;text-align:center;")) %>% 
+   visOptions(highlightNearest = TRUE,
+               nodesIdSelection = TRUE) %>% 
+    visInteraction(keyboard = TRUE, tooltipDelay = 0,
+                   tooltipStyle = 'position: fixed;visibility:hidden;
+                    padding:5px;font-family:cursive;color:white;font-size:10px;
+                    background-color:black;', tooltipStay = 500) %>% 
+      visGroups(groupname = "FINANCE", color = "yellow") %>% 
+      visGroups(groupname = "PLANTATION", color = "chartreuse") %>% 
+      visGroups(groupname = "INDUSTRIAL PRODUCTS & SERVICES", color = "yellowgreen") %>%
+      visGroups(groupname = "INDUSTRIAL PRODUCTS", color = "yellowgreen") %>% 
+      visGroups(groupname = "CONSUMER PRODUCTS & SERVICES", color = "lightcoral") %>% 
+      visGroups(groupname = "CONSUMER PRODUCTS", color = "lightcoral") %>% 
+      visGroups(groupname = "TELECOMMUNICATIONS & MEDIA", color = "lightslateblue") %>% 
+      visGroups(groupname = "TRADING/SERVICES", color = "forestgreen") %>% 
+      visGroups(groupname = "HEALTH CARE", color = "aquamarine") %>% 
+      visGroups(groupname = "REAL ESTATE INVESTMENT TRUSTS", color = "darkviolet") %>%
+      visGroups(groupname = "INFRASTRUCTURE PROJECT COS.", color = "cornflowerblue") %>%
+      visGroups(groupname = "ENERGY", color = "darkred") %>% 
+       visEdges(smooth = TRUE, scaling = list(min=0.2, max=30)) %>%
+          visNodes(scaling = list(min = 5, max = 20))
+ 
+  })
+
+}
+
+
+
+# Create a Shiny app object
+shinyApp(ui = ui, server = server)
+}
+
+getshiny(top30)
+```
